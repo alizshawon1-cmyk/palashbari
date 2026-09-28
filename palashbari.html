@@ -271,13 +271,8 @@
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
     </style>
-<style id="universal-auto-style">
-#playerStatus{
-  position:absolute;left:10px;bottom:10px;z-index:20;
-  padding:6px 10px;border-radius:6px;background:rgba(0,0,0,.65);
-  color:#fff;font-size:12px;pointer-events:none
-}
-#my-video,#html5-video,#clappr-container,#custom-iframe{display:none}
+<style id="auto-only-style">
+#playerStatus{position:absolute;left:10px;bottom:10px;z-index:20;background:rgba(0,0,0,.65);color:#fff;padding:6px 10px;border-radius:6px;font-size:12px;pointer-events:none}
 </style></head>
 <body>
 
@@ -301,10 +296,10 @@
             </div>
             
             <div class="modes">
-                
-                
-                
-                
+                <button class="btn" onclick="switchMode('videojs')">Main (Video.js)</button>
+                <button class="btn" onclick="switchMode('clappr')">Clappr</button>
+                <button class="btn" onclick="switchMode('html5')">HTML5</button>
+                <button class="btn" onclick="switchMode('iframe')">Iframe</button>
                 <button class="btn pip-btn" onclick="togglePIP()">PIP Mode</button>
             </div>
         </div>
@@ -519,286 +514,120 @@
  ];
 
         
-let autoPlayer = null;
+let currentUrl = '';
+let currentMode = 'auto';
+let currentChannel = null;
+let currentServerIndex = 0;
 let autoHls = null;
-let autoVideo = null;
-let autoIframe = null;
+let autoClappr = null;
 let autoGeneration = 0;
-let currentMode = "auto";
 
-function setPlayerStatus(msg) {
-  const el = document.getElementById("playerStatus");
-  if (el) el.textContent = msg;
+function status(msg){
+  const s=document.getElementById('playerStatus');
+  if(s) s.textContent=msg;
 }
 
-function destroyAutoPlayers() {
-  try { if (autoHls) autoHls.destroy(); } catch(e) {}
-  autoHls = null;
-  try { if (autoPlayer && typeof autoPlayer.destroy === "function") autoPlayer.destroy(); } catch(e) {}
-  autoPlayer = null;
-  try { if (videoPlayer && typeof videoPlayer.dispose === "function") videoPlayer.dispose(); } catch(e) {}
-  videoPlayer = null;
+function cleanup(){
+  try{ if(autoHls) autoHls.destroy(); }catch(e){}
+  autoHls=null;
+  try{ if(autoClappr && autoClappr.destroy) autoClappr.destroy(); }catch(e){}
+  autoClappr=null;
+  try{ if(typeof videoPlayer!=='undefined' && videoPlayer && videoPlayer.dispose) videoPlayer.dispose(); }catch(e){}
+  if(typeof videoPlayer!=='undefined') videoPlayer=null;
 
-  const v1 = document.getElementById("my-video");
-  const v2 = document.getElementById("html5-video");
-  const c = document.getElementById("clappr-container");
-  const f = document.getElementById("custom-iframe");
-
-  if (v1) { v1.pause(); v1.removeAttribute("src"); v1.load(); v1.style.display = "none"; }
-  if (v2) { v2.pause(); v2.removeAttribute("src"); v2.load(); v2.style.display = "none"; }
-  if (c) { c.innerHTML = ""; c.style.display = "none"; }
-  if (f) { f.src = "about:blank"; f.style.display = "none"; }
-
-  autoVideo = null;
-  autoIframe = null;
-}
-
-function isHlsUrl(url) {
-  return /\.m3u8(?:$|[?#])/i.test(url) || /(?:m3u8|manifest|playlist)/i.test(url);
-}
-
-function isLikelyWebPage(url) {
-  return /^https?:\/\//i.test(url) &&
-    /\/(?:embed|player|watch|live|stream|video)(?:[/?#]|$)/i.test(url) &&
-    !isHlsUrl(url);
-}
-
-function showVideo(el) {
-  if (el) el.style.display = "block";
-}
-
-function tryNativeHtml5(url, generation, next) {
-  const el = document.getElementById("html5-video");
-  if (!el) return next();
-
-  el.style.display = "block";
-  autoVideo = el;
-  setPlayerStatus("Auto Player: HTML5 পরীক্ষা করছে…");
-
-  let settled = false;
-  const fail = () => {
-    if (settled || generation !== autoGeneration) return;
-    settled = true;
-    el.removeEventListener("error", fail);
-    next();
-  };
-  const ok = () => {
-    if (settled || generation !== autoGeneration) return;
-    settled = true;
-    setPlayerStatus("Auto Player: HTML5");
-    el.removeEventListener("error", fail);
-  };
-
-  el.addEventListener("error", fail, {once:true});
-  el.addEventListener("loadedmetadata", ok, {once:true});
-  el.src = url;
-  el.load();
-  const p = el.play();
-  if (p && p.catch) p.catch(() => { setTimeout(fail, 1200); });
-
-  setTimeout(() => {
-    if (!settled && generation === autoGeneration) fail();
-  }, 4500);
-}
-
-function tryHls(url, generation, next) {
-  const el = document.getElementById("my-video");
-  if (!el) return next();
-
-  el.style.display = "block";
-  autoVideo = el;
-  setPlayerStatus("Auto Player: HLS পরীক্ষা করছে…");
-
-  if (window.Hls && Hls.isSupported()) {
-    const hls = new Hls({
-      enableWorker: true,
-      lowLatencyMode: true,
-      backBufferLength: 30,
-      manifestLoadingMaxRetry: 2,
-      levelLoadingMaxRetry: 2,
-      fragLoadingMaxRetry: 2
-    });
-    autoHls = hls;
-    let done = false;
-
-    const fail = () => {
-      if (done || generation !== autoGeneration) return;
-      done = true;
-      try { hls.destroy(); } catch(e) {}
-      autoHls = null;
-      next();
-    };
-
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      if (done || generation !== autoGeneration) return;
-      done = true;
-      setPlayerStatus("Auto Player: HLS");
-      const p = el.play();
-      if (p && p.catch) p.catch(() => {});
-    });
-
-    hls.on(Hls.Events.ERROR, (event, data) => {
-      if (data && data.fatal) fail();
-    });
-
-    hls.loadSource(url);
-    hls.attachMedia(el);
-    setTimeout(() => { if (!done) fail(); }, 6000);
-    return;
-  }
-
-  if (el.canPlayType && el.canPlayType("application/vnd.apple.mpegurl")) {
-    let done = false;
-    const fail = () => {
-      if (done || generation !== autoGeneration) return;
-      done = true;
-      next();
-    };
-    el.addEventListener("error", fail, {once:true});
-    el.addEventListener("loadedmetadata", () => {
-      if (done || generation !== autoGeneration) return;
-      done = true;
-      setPlayerStatus("Auto Player: Native HLS");
-      const p = el.play();
-      if (p && p.catch) p.catch(() => {});
-    }, {once:true});
-    el.src = url;
-    el.load();
-    setTimeout(() => { if (!done) fail(); }, 4500);
-    return;
-  }
-
-  next();
-}
-
-function tryClappr(url, generation, next) {
-  const box = document.getElementById("clappr-container");
-  if (!box) return next();
-
-  box.style.display = "block";
-  setPlayerStatus("Auto Player: Clappr পরীক্ষা করছে…");
-
-  let settled = false;
-  const fail = () => {
-    if (settled || generation !== autoGeneration) return;
-    settled = true;
-    try { if (autoPlayer && autoPlayer.destroy) autoPlayer.destroy(); } catch(e) {}
-    autoPlayer = null;
-    next();
-  };
-
-  try {
-    autoPlayer = new Clappr.Player({
-      source: url,
-      parentId: "#clappr-container",
-      autoPlay: true,
-      mute: false,
-      width: "100%",
-      height: "100%",
-      mediacontrol: { seekbar: "#fff", buttons: "#fff" }
-    });
-
-    autoPlayer.on(Clappr.Events.PLAYER_READY, () => {
-      if (!settled && generation === autoGeneration) {
-        settled = true;
-        setPlayerStatus("Auto Player: Clappr");
-      }
-    });
-    autoPlayer.on(Clappr.Events.PLAYER_ERROR, fail);
-    setTimeout(() => { if (!settled) fail(); }, 6500);
-  } catch(e) {
-    fail();
-  }
-}
-
-function tryIframe(url, generation) {
-  const f = document.getElementById("custom-iframe");
-  if (!f) return;
-
-  f.style.display = "block";
-  autoIframe = f;
-  setPlayerStatus("Auto Player: Iframe");
-  f.src = url;
-
-  // Cross-origin iframe contents cannot be reliably inspected from this page.
-  // Keep it as the final fallback.
-}
-
-function loadChannelUrl(url, mode = "auto") {
-  if (!url) return;
-  const generation = ++autoGeneration;
-  currentUrl = url;
-  currentMode = "auto";
-  destroyAutoPlayers();
-
-  const isWebPage = isLikelyWebPage(url);
-  const hls = isHlsUrl(url);
-
-  // Universal automatic order. No player button is required.
-  if (isWebPage) {
-    tryIframe(url, generation);
-    return;
-  }
-
-  if (hls) {
-    tryHls(url, generation, () => {
-      if (generation !== autoGeneration) return;
-      tryNativeHtml5(url, generation, () => {
-        if (generation !== autoGeneration) return;
-        tryClappr(url, generation, () => {
-          if (generation !== autoGeneration) return;
-          tryIframe(url, generation);
-        });
-      });
-    });
-    return;
-  }
-
-  tryNativeHtml5(url, generation, () => {
-    if (generation !== autoGeneration) return;
-    tryHls(url, generation, () => {
-      if (generation !== autoGeneration) return;
-      tryClappr(url, generation, () => {
-        if (generation !== autoGeneration) return;
-        tryIframe(url, generation);
-      });
-    });
+  ['my-video','html5-video','clappr-container','custom-iframe'].forEach(id=>{
+    const e=document.getElementById(id);
+    if(!e)return;
+    if(e.tagName==='VIDEO'){e.pause();e.removeAttribute('src');e.load();}
+    if(e.tagName==='IFRAME')e.src='about:blank';
+    else if(id==='clappr-container')e.innerHTML='';
+    e.style.display='none';
   });
 }
 
-function switchMode(mode) {
-  // Kept for compatibility with old code; channel playback remains automatic.
-  if (currentUrl) loadChannelUrl(currentUrl, "auto");
+function looksHls(url){return /\.m3u8(?:[?#]|$)/i.test(url)||/m3u8|manifest|playlist/i.test(url);}
+function looksIframe(url){return !looksHls(url)&&/\/(embed|player|watch|live|video)(?:[/?#]|$)/i.test(url);}
+
+function tryHLS(url,g,next){
+  const v=document.getElementById('my-video'); if(!v)return next();
+  v.style.display='block'; status('Auto: HLS পরীক্ষা...');
+  let done=false;
+  const fail=()=>{if(done||g!==autoGeneration)return;done=true;next();};
+  if(window.Hls&&Hls.isSupported()){
+    autoHls=new Hls({enableWorker:true,lowLatencyMode:true,backBufferLength:30});
+    autoHls.on(Hls.Events.MANIFEST_PARSED,()=>{
+      if(done||g!==autoGeneration)return;
+      done=true;status('Auto: HLS');
+      const p=v.play();if(p)p.catch(()=>{});
+    });
+    autoHls.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)fail();});
+    autoHls.loadSource(url);autoHls.attachMedia(v);
+    setTimeout(fail,6500);
+  }else if(v.canPlayType('application/vnd.apple.mpegurl')){
+    v.src=url;v.load();
+    v.addEventListener('loadedmetadata',()=>{if(!done){done=true;status('Auto: Native HLS');v.play().catch(()=>{});}}, {once:true});
+    v.addEventListener('error',fail,{once:true});
+    setTimeout(fail,4500);
+  }else next();
 }
 
-function loadChannel(ch) {
-  currentChannel = ch;
-  currentServerIndex = 0;
+function tryHTML5(url,g,next){
+  const v=document.getElementById('html5-video');if(!v)return next();
+  v.style.display='block';status('Auto: HTML5 পরীক্ষা...');
+  let done=false;
+  const fail=()=>{if(done||g!==autoGeneration)return;done=true;next();};
+  v.addEventListener('loadedmetadata',()=>{if(!done){done=true;status('Auto: HTML5');v.play().catch(()=>{});}}, {once:true});
+  v.addEventListener('error',fail,{once:true});
+  v.src=url;v.load();
+  const p=v.play();if(p)p.catch(()=>{});
+  setTimeout(fail,5000);
+}
 
-  if (Array.isArray(ch.url)) {
-    currentUrl = ch.url[0];
-  } else {
-    currentUrl = ch.url;
+function tryClappr(url,g,next){
+  const c=document.getElementById('clappr-container');if(!c)return next();
+  c.style.display='block';status('Auto: Clappr পরীক্ষা...');
+  let done=false;
+  const fail=()=>{if(done||g!==autoGeneration)return;done=true;next();};
+  try{
+    autoClappr=new Clappr.Player({source:url,parentId:'#clappr-container',autoPlay:true,width:'100%',height:'100%'});
+    autoClappr.on(Clappr.Events.PLAYER_READY,()=>{if(!done){done=true;status('Auto: Clappr');}});
+    autoClappr.on(Clappr.Events.PLAYER_ERROR,fail);
+    setTimeout(fail,6500);
+  }catch(e){fail();}
+}
+
+function tryIframe(url,g){
+  const f=document.getElementById('custom-iframe');if(!f)return;
+  f.style.display='block';f.src=url;status('Auto: Iframe');
+}
+
+function loadChannelUrl(url,mode='auto'){
+  if(!url)return;
+  const g=++autoGeneration;currentUrl=url;currentMode='auto';cleanup();
+  if(looksIframe(url)){tryIframe(url,g);return;}
+  if(looksHls(url)){
+    tryHLS(url,g,()=>tryHTML5(url,g,()=>tryClappr(url,g,()=>tryIframe(url,g))));
+  }else{
+    tryHTML5(url,g,()=>tryHLS(url,g,()=>tryClappr(url,g,()=>tryIframe(url,g))));
   }
-
-  loadChannelUrl(currentUrl, "auto");
 }
 
-function playCustom() {
-  const input = document.getElementById("customUrl");
-  if (!input || !input.value.trim()) return;
-  currentUrl = input.value.trim();
-  loadChannelUrl(currentUrl, "auto");
+function switchMode(){ if(currentUrl)loadChannelUrl(currentUrl,'auto'); }
+
+function loadChannel(ch){
+  currentChannel=ch;currentServerIndex=0;
+  currentUrl=Array.isArray(ch.url)?ch.url[0]:ch.url;
+  loadChannelUrl(currentUrl,'auto');
 }
 
-function togglePIP() {
-  const v = document.getElementById("my-video") || document.getElementById("html5-video");
-  if (!v) return;
-  if (document.pictureInPictureElement) {
-    document.exitPictureInPicture().catch(()=>{});
-  } else if (v.requestPictureInPicture) {
-    v.requestPictureInPicture().catch(()=>{});
-  }
+function togglePIP(){
+  const v=document.getElementById('my-video')||document.getElementById('html5-video');
+  if(v&&v.requestPictureInPicture)v.requestPictureInPicture().catch(()=>{});
+}
+
+function playCustom(){
+  const i=document.getElementById('customUrl');
+  if(i&&i.value.trim())loadChannelUrl(i.value.trim(),'auto');
 }
 
 const container = document.getElementById('channelContainer');
