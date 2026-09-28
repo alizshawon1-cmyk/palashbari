@@ -271,9 +271,7 @@
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
     </style>
-<style id="auto-only-style">
-#playerStatus{position:absolute;left:10px;bottom:10px;z-index:20;background:rgba(0,0,0,.65);color:#fff;padding:6px 10px;border-radius:6px;font-size:12px;pointer-events:none}
-</style></head>
+</head>
 <body>
 
     <div class="main-container">
@@ -357,21 +355,335 @@
         })();
 
         // ==========================================
-        // PLAYER LOGIC
+        // UNIVERSAL AUTO PLAYER
+        // Detects the URL type and automatically tries
+        // the most suitable player, with fallbacks.
         // ==========================================
         const videoEl = document.getElementById('my-video');
         const iframe = document.getElementById('custom-iframe');
         const clapprEl = document.getElementById('clappr-container');
         const html5El = document.getElementById('html5-video');
-        let clapprInstance;
-        let hls; 
-        let currentMode = 'videojs';
+
+        let hls = null;
+        let clapprInstance = null;
         let currentUrl = '';
+        let currentChannel = null;
+        let currentServerIndex = 0;
+        let autoRun = 0;
+
+        function setPlayerStatus(text) {
+            let el = document.getElementById('playerStatus');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'playerStatus';
+                el.style.cssText =
+                    'position:absolute;left:12px;bottom:12px;z-index:20;' +
+                    'background:rgba(0,0,0,.72);color:#fff;padding:7px 11px;' +
+                    'border-radius:6px;font:13px Arial,sans-serif;pointer-events:none;';
+                document.querySelector('.video-box').appendChild(el);
+            }
+            el.textContent = text || '';
+            el.style.display = text ? 'block' : 'none';
+        }
+
+        function cleanupPlayers() {
+            if (hls) { try { hls.destroy(); } catch(e) {} hls = null; }
+            if (clapprInstance) {
+                try { clapprInstance.destroy(); } catch(e) {}
+                clapprInstance = null;
+            }
+            try { videoEl.pause(); } catch(e) {}
+            try { html5El.pause(); } catch(e) {}
+
+            videoEl.removeAttribute('src');
+            html5El.removeAttribute('src');
+            videoEl.load();
+            html5El.load();
+            iframe.src = 'about:blank';
+
+            videoEl.style.display = 'none';
+            html5El.style.display = 'none';
+            iframe.style.display = 'none';
+            clapprEl.style.display = 'none';
+            clapprEl.innerHTML = '';
+        }
+
+        function isHlsUrl(url) {
+            const u = String(url || '').toLowerCase();
+            return u.includes('.m3u8') ||
+                   u.includes('manifest') ||
+                   u.includes('playlist') ||
+                   u.includes('chunklist');
+        }
+
+        function isLikelyIframeUrl(url) {
+            const u = String(url || '').toLowerCase();
+            return /\.(html?|php)(\?|#|$)/.test(u) ||
+                   u.includes('/embed/') ||
+                   u.includes('/player/') ||
+                   u.includes('embed.') ||
+                   u.includes('watch.');
+        }
+
+        function showVideo() {
+            videoEl.style.display = 'block';
+            html5El.style.display = 'none';
+            iframe.style.display = 'none';
+            clapprEl.style.display = 'none';
+        }
+
+        function tryHTML5(url, token) {
+            return new Promise(resolve => {
+                if (token !== autoRun) return resolve(false);
+                showVideo();
+                setPlayerStatus('HTML5 player চেষ্টা হচ্ছে…');
+
+                const v = html5El;
+                v.style.display = 'block';
+                videoEl.style.display = 'none';
+
+                let done = false;
+                const finish = ok => {
+                    if (done) return;
+                    done = true;
+                    v.removeEventListener('playing', onPlaying);
+                    v.removeEventListener('error', onError);
+                    clearTimeout(timer);
+                    resolve(ok);
+                };
+                const onPlaying = () => {
+                    if (token === autoRun) setPlayerStatus('');
+                    finish(true);
+                };
+                const onError = () => finish(false);
+                const timer = setTimeout(() => finish(false), 7000);
+
+                v.addEventListener('playing', onPlaying, {once:true});
+                v.addEventListener('error', onError, {once:true});
+                v.src = url;
+                const p = v.play();
+                if (p && p.catch) p.catch(() => {});
+            });
+        }
+
+        function tryHLS(url, token) {
+            return new Promise(resolve => {
+                if (token !== autoRun) return resolve(false);
+                if (!window.Hls || !Hls.isSupported()) return resolve(false);
+
+                showVideo();
+                setPlayerStatus('HLS player চেষ্টা হচ্ছে…');
+
+                const player = new Hls({
+                    enableWorker: true,
+                    lowLatencyMode: true
+                });
+                hls = player;
+
+                let done = false;
+                const finish = ok => {
+                    if (done) return;
+                    done = true;
+                    clearTimeout(timer);
+                    if (!ok && hls === player) {
+                        try { player.destroy(); } catch(e) {}
+                        hls = null;
+                    }
+                    resolve(ok);
+                };
+
+                const timer = setTimeout(() => finish(false), 9000);
+
+                player.loadSource(url);
+                player.attachMedia(videoEl);
+
+                player.on(Hls.Events.MANIFEST_PARSED, () => {
+                    const p = videoEl.play();
+                    if (p && p.then) p.then(() => finish(true)).catch(() => {});
+                    else finish(true);
+                });
+                player.on(Hls.Events.ERROR, (_, data) => {
+                    if (data && data.fatal) finish(false);
+                });
+            });
+        }
+
+        function tryNativeVideo(url, token) {
+            return new Promise(resolve => {
+                if (token !== autoRun) return resolve(false);
+                showVideo();
+                setPlayerStatus('Native HTML5 HLS চেষ্টা হচ্ছে…');
+
+                let done = false;
+                const finish = ok => {
+                    if (done) return;
+                    done = true;
+                    videoEl.removeEventListener('playing', onPlaying);
+                    videoEl.removeEventListener('error', onError);
+                    clearTimeout(timer);
+                    resolve(ok);
+                };
+                const onPlaying = () => {
+                    setPlayerStatus('');
+                    finish(true);
+                };
+                const onError = () => finish(false);
+                const timer = setTimeout(() => finish(false), 7000);
+
+                videoEl.addEventListener('playing', onPlaying, {once:true});
+                videoEl.addEventListener('error', onError, {once:true});
+                videoEl.src = url;
+                const p = videoEl.play();
+                if (p && p.catch) p.catch(() => {});
+            });
+        }
+
+        function tryClappr(url, token) {
+            return new Promise(resolve => {
+                if (token !== autoRun || !window.Clappr) return resolve(false);
+                clapprEl.style.display = 'block';
+                videoEl.style.display = 'none';
+                html5El.style.display = 'none';
+                iframe.style.display = 'none';
+                setPlayerStatus('Clappr player চেষ্টা হচ্ছে…');
+
+                let settled = false;
+                const finish = ok => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    if (!ok && clapprInstance) {
+                        try { clapprInstance.destroy(); } catch(e) {}
+                        clapprInstance = null;
+                        clapprEl.innerHTML = '';
+                    }
+                    resolve(ok);
+                };
+                const timer = setTimeout(() => finish(false), 9000);
+
+                try {
+                    clapprInstance = new Clappr.Player({
+                        source: url,
+                        parentId: '#clappr-container',
+                        width: '100%',
+                        height: '100%',
+                        autoPlay: true,
+                        mute: false
+                    });
+                    clapprInstance.on(Clappr.Events.PLAYER_PLAY, () => {
+                        setPlayerStatus('');
+                        finish(true);
+                    });
+                    clapprInstance.on(Clappr.Events.PLAYER_ERROR, () => finish(false));
+                } catch(e) {
+                    finish(false);
+                }
+            });
+        }
+
+        function tryIframe(url, token) {
+            return new Promise(resolve => {
+                if (token !== autoRun) return resolve(false);
+                iframe.src = url;
+                iframe.style.display = 'block';
+                videoEl.style.display = 'none';
+                html5El.style.display = 'none';
+                clapprEl.style.display = 'none';
+                setPlayerStatus('Iframe player ব্যবহার করা হচ্ছে…');
+
+                // Cross-origin iframe content cannot be inspected by this page.
+                // Treat iframe as the final fallback rather than guessing its internals.
+                setTimeout(() => {
+                    if (token === autoRun) setPlayerStatus('');
+                    resolve(true);
+                }, 700);
+            });
+        }
+
+        async function loadChannelUrl(url) {
+            currentUrl = String(url || '');
+            const token = ++autoRun;
+            cleanupPlayers();
+
+            if (!currentUrl) {
+                setPlayerStatus('Stream URL পাওয়া যায়নি');
+                return;
+            }
+
+            const iframeFirst = isLikelyIframeUrl(currentUrl);
+            const hlsFirst = isHlsUrl(currentUrl);
+
+            let ok = false;
+
+            if (iframeFirst) {
+                ok = await tryIframe(currentUrl, token);
+                if (!ok) ok = await tryHTML5(currentUrl, token);
+            } else if (hlsFirst) {
+                ok = await tryHLS(currentUrl, token);
+                if (!ok) ok = await tryNativeVideo(currentUrl, token);
+                if (!ok) ok = await tryClappr(currentUrl, token);
+                if (!ok) ok = await tryIframe(currentUrl, token);
+            } else {
+                ok = await tryNativeVideo(currentUrl, token);
+                if (!ok) ok = await tryHLS(currentUrl, token);
+                if (!ok) ok = await tryClappr(currentUrl, token);
+                if (!ok) ok = await tryIframe(currentUrl, token);
+            }
+
+            if (!ok && token === autoRun) {
+                setPlayerStatus('এই stream কোনো supported player-এ চালানো যায়নি');
+            }
+        }
+
+        // Kept only for compatibility; users do not need to select a mode.
+        function switchMode(mode) {
+            if (currentUrl) loadChannelUrl(currentUrl);
+        }
+
+        function loadChannel(ch) {
+            currentChannel = ch;
+            currentServerIndex = 0;
+
+            const buttonsContainer = document.getElementById('serverButtonsContainer');
+            const channelNameEl = document.getElementById('activeChannelName');
+            buttonsContainer.innerHTML = '';
+
+            const urls = Array.isArray(ch.url) ? ch.url : [ch.url];
+            channelNameEl.innerText = ch.name + (urls.length > 1 ? ' - সার্ভার পরিবর্তন করুন' : '');
+
+            urls.forEach((link, index) => {
+                const sBtn = document.createElement('button');
+                sBtn.className = 'server-btn';
+                sBtn.innerText = `Server ${index + 1}`;
+                if (index === 0) sBtn.classList.add('active');
+
+                sBtn.onclick = () => {
+                    currentServerIndex = index;
+                    document.querySelectorAll('.server-btn').forEach(b => b.classList.remove('active'));
+                    sBtn.classList.add('active');
+                    loadChannelUrl(link);
+                };
+                buttonsContainer.appendChild(sBtn);
+            });
+
+            loadChannelUrl(urls[0]);
+        }
 
         function togglePIP() {
-            if (videoEl.style.display !== 'none' && document.pictureInPictureEnabled) {
-                videoEl.requestPictureInPicture();
+            const active = videoEl.style.display !== 'none' ? videoEl : html5El;
+            if (document.pictureInPictureEnabled && active && active.readyState >= 1) {
+                active.requestPictureInPicture().catch(() => {});
             }
+        }
+
+        function playCustom() {
+            const input = document.getElementById('customUrlInput');
+            const url = input ? input.value.trim() : '';
+            if (!url) return;
+
+            document.getElementById('serverButtonsContainer').innerHTML = '';
+            document.getElementById('activeChannelName').innerText = 'Custom URL';
+            loadChannelUrl(url);
         }
 
         const channels = [
@@ -513,124 +825,88 @@
             { name: "Discovery", url: "https://jioplaylistdown.yecic62314.workers.dev/live.m3u8?id=573", logo: "https://assets-prod.services.toffeelive.com/f_png,w_300,q_85/KS6x-JQBv9knK3AHwDZy/posters/6594d216-aaca-4eee-b6f5-bbc6b80feb1" }
  ];
 
-        
-let currentUrl = '';
-let currentMode = 'auto';
-let currentChannel = null;
-let currentServerIndex = 0;
-let autoHls = null;
-let autoClappr = null;
-let autoGeneration = 0;
+        function switchMode(mode) {
+            if (currentUrl) loadChannelUrl(currentUrl, mode);
+        }
 
-function status(msg){
-  const s=document.getElementById('playerStatus');
-  if(s) s.textContent=msg;
-}
+        function loadChannel(ch) {
+            const buttonsContainer = document.getElementById('serverButtonsContainer');
+            const channelNameEl = document.getElementById('activeChannelName');
 
-function cleanup(){
-  try{ if(autoHls) autoHls.destroy(); }catch(e){}
-  autoHls=null;
-  try{ if(autoClappr && autoClappr.destroy) autoClappr.destroy(); }catch(e){}
-  autoClappr=null;
-  try{ if(typeof videoPlayer!=='undefined' && videoPlayer && videoPlayer.dispose) videoPlayer.dispose(); }catch(e){}
-  if(typeof videoPlayer!=='undefined') videoPlayer=null;
+            buttonsContainer.innerHTML = '';
 
-  ['my-video','html5-video','clappr-container','custom-iframe'].forEach(id=>{
-    const e=document.getElementById(id);
-    if(!e)return;
-    if(e.tagName==='VIDEO'){e.pause();e.removeAttribute('src');e.load();}
-    if(e.tagName==='IFRAME')e.src='about:blank';
-    else if(id==='clappr-container')e.innerHTML='';
-    e.style.display='none';
-  });
-}
+            let urls = Array.isArray(ch.url) ? ch.url : [ch.url];
+            channelNameEl.innerText = ch.name + " - সার্ভার পরিবর্তন করুন";
 
-function looksHls(url){return /\.m3u8(?:[?#]|$)/i.test(url)||/m3u8|manifest|playlist/i.test(url);}
-function looksIframe(url){return !looksHls(url)&&/\/(embed|player|watch|live|video)(?:[/?#]|$)/i.test(url);}
+            urls.forEach((link, index) => {
+                const sBtn = document.createElement('button');
+                sBtn.className = 'server-btn';
+                sBtn.innerText = `Server ${index + 1}`;
+                if (index === 0) sBtn.classList.add('active');
 
-function tryHLS(url,g,next){
-  const v=document.getElementById('my-video'); if(!v)return next();
-  v.style.display='block'; status('Auto: HLS পরীক্ষা...');
-  let done=false;
-  const fail=()=>{if(done||g!==autoGeneration)return;done=true;next();};
-  if(window.Hls&&Hls.isSupported()){
-    autoHls=new Hls({enableWorker:true,lowLatencyMode:true,backBufferLength:30});
-    autoHls.on(Hls.Events.MANIFEST_PARSED,()=>{
-      if(done||g!==autoGeneration)return;
-      done=true;status('Auto: HLS');
-      const p=v.play();if(p)p.catch(()=>{});
-    });
-    autoHls.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)fail();});
-    autoHls.loadSource(url);autoHls.attachMedia(v);
-    setTimeout(fail,6500);
-  }else if(v.canPlayType('application/vnd.apple.mpegurl')){
-    v.src=url;v.load();
-    v.addEventListener('loadedmetadata',()=>{if(!done){done=true;status('Auto: Native HLS');v.play().catch(()=>{});}}, {once:true});
-    v.addEventListener('error',fail,{once:true});
-    setTimeout(fail,4500);
-  }else next();
-}
+                sBtn.onclick = () => {
+                    document.querySelectorAll('.server-btn').forEach(b => b.classList.remove('active'));
+                    sBtn.classList.add('active');
+                    loadChannelUrl(link, currentMode);
+                };
+                buttonsContainer.appendChild(sBtn);
+            });
 
-function tryHTML5(url,g,next){
-  const v=document.getElementById('html5-video');if(!v)return next();
-  v.style.display='block';status('Auto: HTML5 পরীক্ষা...');
-  let done=false;
-  const fail=()=>{if(done||g!==autoGeneration)return;done=true;next();};
-  v.addEventListener('loadedmetadata',()=>{if(!done){done=true;status('Auto: HTML5');v.play().catch(()=>{});}}, {once:true});
-  v.addEventListener('error',fail,{once:true});
-  v.src=url;v.load();
-  const p=v.play();if(p)p.catch(()=>{});
-  setTimeout(fail,5000);
-}
+            loadChannelUrl(urls[0], currentMode);
+        }
 
-function tryClappr(url,g,next){
-  const c=document.getElementById('clappr-container');if(!c)return next();
-  c.style.display='block';status('Auto: Clappr পরীক্ষা...');
-  let done=false;
-  const fail=()=>{if(done||g!==autoGeneration)return;done=true;next();};
-  try{
-    autoClappr=new Clappr.Player({source:url,parentId:'#clappr-container',autoPlay:true,width:'100%',height:'100%'});
-    autoClappr.on(Clappr.Events.PLAYER_READY,()=>{if(!done){done=true;status('Auto: Clappr');}});
-    autoClappr.on(Clappr.Events.PLAYER_ERROR,fail);
-    setTimeout(fail,6500);
-  }catch(e){fail();}
-}
+        function loadChannelUrl(url, mode) {
+            currentUrl = url;
+            currentMode = mode;
 
-function tryIframe(url,g){
-  const f=document.getElementById('custom-iframe');if(!f)return;
-  f.style.display='block';f.src=url;status('Auto: Iframe');
-}
+            videoEl.style.display = 'none';
+            iframe.style.display = 'none';
+            clapprEl.style.display = 'none';
+            html5El.style.display = 'none';
+            
+            if (hls) { hls.destroy(); hls = null; }
+            if (clapprInstance) { clapprInstance.destroy(); clapprInstance = null; }
+            videoEl.pause();
+            videoEl.src = "";
+            videoEl.load();
+            html5El.pause();
+            html5El.src = "";
+            iframe.src = "about:blank";
 
-function loadChannelUrl(url,mode='auto'){
-  if(!url)return;
-  const g=++autoGeneration;currentUrl=url;currentMode='auto';cleanup();
-  if(looksIframe(url)){tryIframe(url,g);return;}
-  if(looksHls(url)){
-    tryHLS(url,g,()=>tryHTML5(url,g,()=>tryClappr(url,g,()=>tryIframe(url,g))));
-  }else{
-    tryHTML5(url,g,()=>tryHLS(url,g,()=>tryClappr(url,g,()=>tryIframe(url,g))));
-  }
-}
+            if (mode === 'iframe') {
+                iframe.src = url;
+                iframe.style.display = 'block';
+            } else if (mode === 'clappr') {
+                clapprEl.style.display = 'block';
+                clapprInstance = new Clappr.Player({source: url, parentId: "#clappr-container", width: '100%', height: '100%', autoPlay: true});
+            } else if (mode === 'html5') {
+                html5El.style.display = 'block';
+                html5El.src = url;
+                html5El.play();
+            } else {
+                videoEl.style.display = 'block';
+                if (Hls.isSupported()) {
+                    hls = new Hls();
+                    hls.loadSource(url);
+                    hls.attachMedia(videoEl);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play());
+                } else {
+                    videoEl.src = url;
+                    videoEl.play();
+                }
+            }
+        }
 
-function switchMode(){ if(currentUrl)loadChannelUrl(currentUrl,'auto'); }
+        function playCustom() {
+            const url = document.getElementById('customUrlInput').value;
+            if(url) {
+                document.getElementById('serverButtonsContainer').innerHTML = "";
+                document.getElementById('activeChannelName').innerText = "Custom URL - সার্ভার পরিবর্তন করুন";
+                loadChannelUrl(url, currentMode);
+            }
+        }
 
-function loadChannel(ch){
-  currentChannel=ch;currentServerIndex=0;
-  currentUrl=Array.isArray(ch.url)?ch.url[0]:ch.url;
-  loadChannelUrl(currentUrl,'auto');
-}
-
-function togglePIP(){
-  const v=document.getElementById('my-video')||document.getElementById('html5-video');
-  if(v&&v.requestPictureInPicture)v.requestPictureInPicture().catch(()=>{});
-}
-
-function playCustom(){
-  const i=document.getElementById('customUrl');
-  if(i&&i.value.trim())loadChannelUrl(i.value.trim(),'auto');
-}
-
-const container = document.getElementById('channelContainer');
+        const container = document.getElementById('channelContainer');
         channels.forEach(ch => {
             const btn = document.createElement('div');
             btn.className = 'ch-btn';
